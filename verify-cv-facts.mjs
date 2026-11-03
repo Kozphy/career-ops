@@ -12,10 +12,24 @@
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveUserRoot, envOrUserPath } from './user-root.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_SOURCES = ['cv.md', 'article-digest.md'];
-const DEFAULT_CONFIG = join(ROOT, 'config', 'cv-facts.json');
+const USER_ROOT = resolveUserRoot(ROOT);
+const DEFAULT_SOURCES = [
+  envOrUserPath('CAREER_OPS_CV', ROOT, 'cv.md'),
+  envOrUserPath('CAREER_OPS_DIGEST', ROOT, 'article-digest.md'),
+];
+const DEFAULT_CONFIG = envOrUserPath('CAREER_OPS_CV_FACTS', ROOT, 'config', 'cv-facts.json');
+
+/**
+ * LIMITATIONS (documented intentionally):
+ * - Checks metric-like claims (counts, %, currency, multipliers) against sources.
+ * - Does NOT verify employers, job titles, credentials, dates, authorship,
+ *   or that real-world outcomes occurred.
+ * - Presence in cv.md is not independent verification — only "claim appears in
+ *   an allowed source file". Do not expand allow_metrics just to silence failures.
+ */
 
 function readIfExists(path) {
   return existsSync(path) ? readFileSync(path, 'utf-8') : '';
@@ -98,6 +112,13 @@ const SIMPLE_CLAIM_PATTERNS = [
   /\b\d+(?:\.\d+)?\s?x\b/gi,
 ];
 
+// Common Traditional/Simplified Chinese countable classifiers after a numeral.
+const ZH_METRIC_CLASSIFIERS = '件|筆|份|人|家|次|項|門|個|名|頁|小時|天|週|周|月|年|位|條|檔|案|場|班|課|專案|項目';
+const ZH_COUNT_CLAIM_RE = new RegExp(
+  String.raw`(\d[\d,.]*)\s*\+?\s*(${ZH_METRIC_CLASSIFIERS})`,
+  'g'
+);
+
 function metricClaims(text) {
   const clean = stripMarkup(text);
   const claims = new Set();
@@ -112,6 +133,11 @@ function metricClaims(text) {
   for (const match of clean.matchAll(COUNT_CLAIM_RE)) {
     const noun = match[2].toLowerCase();
     claims.add(normalizeClaim(`${match[1]} ${NOUN_SYNONYMS.get(noun) ?? noun}`));
+  }
+
+  ZH_COUNT_CLAIM_RE.lastIndex = 0;
+  for (const match of clean.matchAll(ZH_COUNT_CLAIM_RE)) {
+    claims.add(normalizeClaim(`${match[1]} ${match[2]}`));
   }
 
   return claims;
@@ -274,7 +300,33 @@ function runSelfTest() {
     ['proven track record']
   );
 
+  // Chinese numeric claims (Traditional classifiers).
+  const zhSource = '協助處理 12 件申報案件，並完成 3 份查核報告。';
+  eq(
+    'Chinese sourced count passes',
+    auditClaims('協助處理 12 件申報案件', zhSource).invented,
+    []
+  );
+  eq(
+    'Chinese inflated count is caught',
+    auditClaims('協助處理 999 件申報案件', zhSource).invented,
+    ['999 件']
+  );
+  eq(
+    'Chinese invented report count is caught',
+    auditClaims('完成 88 份查核報告', zhSource).invented,
+    ['88 份']
+  );
+
+  // Documented limitation: fabricated employers are invisible to metric checks.
+  eq(
+    'LIMITATION: fabricated employer name is not a metric claim',
+    auditClaims('Analyst at Fictional Holdings PLC (2019–2021).', source).invented,
+    []
+  );
+
   console.log(`\nverify-cv-facts self-test: ${passed} passed, ${failed} failed`);
+  console.log('Note: employers, credentials, dates, authorship, and outcomes are NOT verified.');
   if (failed > 0) process.exit(1);
 }
 
@@ -332,21 +384,30 @@ Default config:  config/cv-facts.json (optional)`);
       process.exit(1);
     }
 
-    const sources = sourceArgs.length > 0 ? sourceArgs : DEFAULT_SOURCES;
-    const sourceText = sources.map(path => readIfExists(resolveInputPath(path))).join('\n');
+    const sources = sourceArgs.length > 0
+      ? sourceArgs.map(p => (isAbsolute(p) ? p : resolveInputPath(p)))
+      : DEFAULT_SOURCES;
+    const sourceText = sources.map(path => readIfExists(path)).join('\n');
     const targetText = readFileSync(targetPath, 'utf-8');
     let config;
     try {
-      config = loadConfig(resolveInputPath(configPath));
+      const cfgPath = isAbsolute(configPath) || configPath === DEFAULT_CONFIG
+        ? configPath
+        : resolveInputPath(configPath);
+      config = loadConfig(cfgPath);
     } catch (err) {
       console.error(`ERROR: invalid config: ${err.message}`);
       process.exit(1);
     }
 
+    console.log(`verify-cv-facts: userRoot=${USER_ROOT}`);
+    console.log(`verify-cv-facts: sources=${sources.join(', ')}`);
+
     const { invented, forbidden } = auditClaims(targetText, sourceText, config);
 
     if (invented.length === 0 && forbidden.length === 0) {
       console.log(`CV fact check passed: ${basename(targetPath)}`);
+      console.log('Limitation: employers, credentials, dates, authorship, and outcomes were not verified.');
       process.exit(0);
     }
 
@@ -360,6 +421,8 @@ Default config:  config/cv-facts.json (optional)`);
       for (const phrase of forbidden) console.error(`  - ${phrase}`);
     }
     console.error('\nAdd real evidence to cv.md/article-digest.md, or allow a verified exception in config/cv-facts.json.');
+    console.error('Do not add metrics to the allowlist merely to silence a failure.');
+    console.error('Limitation: this tool does not verify employers, credentials, dates, authorship, or outcomes.');
     process.exit(1);
   }
 }

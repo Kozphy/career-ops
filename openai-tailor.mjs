@@ -20,24 +20,37 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
+import {
+  getSystemRoot,
+  resolveUserRoot,
+  envOrUserPath,
+  paperFormatFromProfile,
+  candidateDisplayName,
+} from './user-root.mjs';
+import { auditClaims } from './verify-cv-facts.mjs';
 
 try {
   const { config } = await import('dotenv');
   config();
 } catch { /* dotenv optional */ }
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
+const ROOT = getSystemRoot(import.meta.url);
+const USER_ROOT = resolveUserRoot(ROOT);
 
 // ---------------------------------------------------------------------------
-// Paths
+// Paths — system templates stay under ROOT; personal data under USER_ROOT
 // ---------------------------------------------------------------------------
 const PATHS = {
   shared:   join(ROOT, 'modes', '_shared.md'),
   pdfMode:  join(ROOT, 'modes', 'pdf.md'),
-  cv:       join(ROOT, 'cv.md'),
-  profile:  join(ROOT, 'config', 'profile.yml'),
+  cv:       envOrUserPath('CAREER_OPS_CV', ROOT, 'cv.md'),
+  profile:  envOrUserPath('CAREER_OPS_PROFILE', ROOT, 'config', 'profile.yml'),
+  digest:   envOrUserPath('CAREER_OPS_DIGEST', ROOT, 'article-digest.md'),
+  userProfileMode: envOrUserPath('CAREER_OPS_PROFILE_MD', ROOT, 'modes', '_profile.md'),
+  custom:   envOrUserPath('CAREER_OPS_CUSTOM', ROOT, 'modes', '_custom.md'),
   template: join(ROOT, 'templates', 'cv-template.html'),
-  output:   join(ROOT, 'output'),
+  output:   envOrUserPath('CAREER_OPS_OUTPUT', ROOT, 'output'),
+  factsConfig: envOrUserPath('CAREER_OPS_CV_FACTS', ROOT, 'config', 'cv-facts.json'),
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +69,7 @@ if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
   USAGE
     node openai-tailor.mjs --jd <path> --report <path>
     node openai-tailor.mjs --url <base> --model <id> --jd <path> --report <path>
+    node openai-tailor.mjs --paths-only
 
   OPTIONS
     --jd <path>      Path to the Job Description text file
@@ -64,10 +78,13 @@ if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     --url <base>     OpenAI-compatible base URL, including any /v1
                      (env OPENAI_BASE_URL, default https://api.openai.com/v1)
     --key <key>      API key             (env OPENAI_API_KEY)
+    --paths-only     Print resolved context paths and exit (no API call)
     --help           Show this help
 
   ENV
     OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_TIMEOUT_MS
+    CAREER_OPS_USER_ROOT, CAREER_OPS_CV, CAREER_OPS_PROFILE, CAREER_OPS_DIGEST,
+    CAREER_OPS_OUTPUT (optional path overrides)
 
   EXAMPLES
     OPENAI_API_KEY=sk-... node openai-tailor.mjs --jd ./jds/job.txt --report reports/001-company-2026-01-01.md
@@ -82,6 +99,8 @@ let modelName  = process.env.OPENAI_MODEL || 'gpt-4o'; // Tailoring needs a smar
 let baseUrl    = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
 let apiKey     = process.env.OPENAI_API_KEY || '';
 
+let pathsOnly = false;
+
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--jd' && args[i + 1]) {
     jdPath = args[++i];
@@ -93,7 +112,14 @@ for (let i = 0; i < args.length; i++) {
     baseUrl = args[++i].replace(/\/$/, '');
   } else if (args[i] === '--key' && args[i + 1]) {
     apiKey = args[++i];
+  } else if (args[i] === '--paths-only') {
+    pathsOnly = true;
   }
+}
+
+if (pathsOnly) {
+  console.log(JSON.stringify({ systemRoot: ROOT, userRoot: USER_ROOT, paths: PATHS }, null, 2));
+  process.exit(0);
 }
 
 if (!jdPath || !reportPath) {
@@ -179,19 +205,32 @@ function readFile(path, label, required = false) {
 // ---------------------------------------------------------------------------
 // Load context files
 // ---------------------------------------------------------------------------
-console.log('\\n📂  Loading context files...');
+console.log('\n📂  Loading context files...');
+console.log(`   userRoot=${USER_ROOT}`);
+console.log(`   systemRoot=${ROOT}`);
 
 const sharedContext  = readFile(PATHS.shared, 'modes/_shared.md', false);
 const pdfModeLogic   = readFile(PATHS.pdfMode, 'modes/pdf.md', false);
 const cvContent      = readFile(PATHS.cv, 'cv.md', true);
 const profileContent = readFile(PATHS.profile, 'config/profile.yml', true);
+const digestContent  = readFile(PATHS.digest, 'article-digest.md', false);
+const profileModeContent = readFile(PATHS.userProfileMode, 'modes/_profile.md', false);
+const customContent  = readFile(PATHS.custom, 'modes/_custom.md', false);
 const templateHtml   = readFile(PATHS.template, 'templates/cv-template.html', true);
+
+let parsedProfile = {};
+try {
+  parsedProfile = yaml.load(profileContent) || {};
+} catch (err) {
+  console.warn(`⚠️   Failed to parse profile.yml early: ${err.message}`);
+}
+const paperFormat = paperFormatFromProfile(parsedProfile);
 
 // ---------------------------------------------------------------------------
 // Build system prompt
 // ---------------------------------------------------------------------------
 const systemPrompt = `You are career-ops, an AI-powered CV tailoring engine.
-You read a candidate's base CV, profile, an evaluation report, and a Job Description.
+You read a candidate's base CV, evidence digest, profile, procedural rules, an evaluation report, and a Job Description.
 Your job is to apply strict anti-fabrication tailoring rules to fill in an HTML template.
 
 ═══════════════════════════════════════════════════════
@@ -210,23 +249,34 @@ HTML TEMPLATE (cv-template.html)
 ${templateHtml}
 
 ═══════════════════════════════════════════════════════
-CANDIDATE BASE CV & PROFILE
+CANDIDATE BASE CV, EVIDENCE & PROFILE
 ═══════════════════════════════════════════════════════
 [cv.md]
 ${cvContent}
 
+[article-digest.md]
+${digestContent}
+
 [config/profile.yml]
 ${profileContent}
+
+[modes/_profile.md]
+${profileModeContent}
+
+[modes/_custom.md] (procedural / style only — do not invent facts from this file)
+${customContent}
 
 ═══════════════════════════════════════════════════════
 IMPORTANT OPERATING RULES FOR THIS SESSION
 ═══════════════════════════════════════════════════════
-1. NEVER invent skills, metrics, or experience the candidate does not have.
-2. Inject keywords naturally by reformulating the real experience using JD vocabulary.
-3. Apply the 6-second clarity gate: strongest matching evidence first.
-4. Replace all {{PLACEHOLDERS}} in the HTML Template exactly as instructed.
-5. Your final output MUST be the complete, raw, tailored HTML document.
-6. Do NOT include markdown formatting like \`\`\`html or conversational filler. Output the raw HTML starting with <!DOCTYPE html> and ending with </html>.`;
+1. NEVER invent skills, metrics, employers, credentials, dates, or experience absent from cv.md / article-digest.md / profile.yml / _profile.md.
+2. Presence in cv.md is NOT independent verification — do not escalate claims beyond the source wording; preserve synthetic-data and portfolio-only labels.
+3. Inject keywords naturally by reformulating the real experience using JD vocabulary.
+4. Apply the 6-second clarity gate: strongest matching evidence first.
+5. Replace all {{PLACEHOLDERS}} in the HTML Template exactly as instructed.
+6. Target paper size for this candidate: ${paperFormat.toUpperCase()} (layout for that page size).
+7. Your final output MUST be the complete, raw, tailored HTML document.
+8. Do NOT include markdown formatting like \`\`\`html or conversational filler. Output the raw HTML starting with <!DOCTYPE html> and ending with </html>.`;
 
 // ---------------------------------------------------------------------------
 // Call the OpenAI-compatible endpoint
@@ -289,15 +339,7 @@ try {
     mkdirSync(PATHS.output, { recursive: true });
   }
 
-  let candidateName = 'candidate';
-  try {
-    const profile = yaml.load(profileContent);
-    if (profile && profile.name) {
-      candidateName = profile.name;
-    }
-  } catch (err) {
-    console.warn(`⚠️   Failed to parse profile.yml: ${err.message}`);
-  }
+  let candidateName = candidateDisplayName(parsedProfile);
   candidateName = candidateName
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
@@ -307,12 +349,38 @@ try {
   writeFileSync(htmlPath, tailoredHtml, 'utf-8');
   console.log(`\n✅  Tailored HTML saved: ${htmlPath}`);
 
-  // Print next steps
+  // Fact-check metrics before declaring success (does NOT verify employers,
+  // credentials, dates, authorship, or real-world outcomes).
+  const sourceBundle = [cvContent, digestContent].join('\n');
+  let factsConfig = { allow_metrics: [], forbidden_phrases: [] };
+  if (existsSync(PATHS.factsConfig)) {
+    try {
+      factsConfig = JSON.parse(readFileSync(PATHS.factsConfig, 'utf-8'));
+    } catch (err) {
+      console.warn(`⚠️   Could not parse cv-facts.json: ${err.message}`);
+    }
+  }
+  const { invented, forbidden } = auditClaims(tailoredHtml, sourceBundle, factsConfig);
+  if (invented.length > 0 || forbidden.length > 0) {
+    console.error('\n❌  CV fact check failed after tailor — HTML kept for inspection but exit is non-zero.');
+    if (invented.length > 0) {
+      console.error('Unsupported metric-like claims (absent from cv.md / article-digest.md / allowlist):');
+      for (const claim of invented) console.error(`  - ${claim}`);
+    }
+    if (forbidden.length > 0) {
+      console.error('Forbidden phrases:');
+      for (const phrase of forbidden) console.error(`  - ${phrase}`);
+    }
+    console.error('\nNote: automated checks do not verify employers, credentials, dates, authorship, or outcomes.');
+    process.exit(1);
+  }
+  console.log('✓  Metric fact check passed (employers/credentials/dates/authorship NOT verified).');
+
   const pdfFilename = `cv-${candidateName}-${companySlug}-${roleSlug}-${new Date().toISOString().split('T')[0]}.pdf`;
   const reportNumMatch = reportFilename.match(/^(\d+)-/);
   const reportNum = reportNumMatch ? reportNumMatch[1] : '001';
 
-  console.log(`\n📄  Next step (generate PDF):\n    node generate-pdf.mjs output/${filename} output/${pdfFilename} --format=letter --report=${reportNum}\n`);
+  console.log(`\n📄  Next step (generate PDF):\n    node generate-pdf.mjs "${htmlPath}" "${join(PATHS.output, pdfFilename)}" --format=${paperFormat} --report=${reportNum}\n`);
 
 } catch (err) {
   console.warn(`⚠️   Could not save HTML: ${err.message}`);

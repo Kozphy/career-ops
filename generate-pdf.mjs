@@ -33,12 +33,30 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { readStyleTokens, injectThemeStyle } from './theme-style.mjs';
+import { resolveUserRoot } from './user-root.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const USER_ROOT = resolveUserRoot(__dirname);
 const PDF_PAGE_MARGIN = '0.6in';
 
-// Ensure output directory exists (fresh setup)
-mkdirSync(resolve(__dirname, 'output'), { recursive: true });
+function isInsideRoot(root, pathValue) {
+  const rel = relative(root, resolve(pathValue));
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+function assertWritablePdfPath(outputPath) {
+  if (isInsideRoot(__dirname, outputPath) || isInsideRoot(USER_ROOT, outputPath)) {
+    return;
+  }
+  console.error(`Refusing to write the PDF outside the project directory: ${outputPath}`);
+  process.exit(1);
+}
+
+// Ensure output directories exist (user layer preferred; system folder for classic installs)
+mkdirSync(resolve(USER_ROOT, 'output'), { recursive: true });
+if (USER_ROOT !== __dirname) {
+  mkdirSync(resolve(__dirname, 'output'), { recursive: true });
+}
 
 /**
  * Normalize text for ATS compatibility by converting problematic Unicode.
@@ -337,9 +355,14 @@ function countRenderedPdfPages(pdfBuffer) {
  */
 export function repoRelativeManifestPath(pathValue) {
   if (!pathValue) return '';
-  const rel = relative(__dirname, resolve(pathValue));
-  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return '';
-  return rel.split(sep).join('/');
+  const abs = resolve(pathValue);
+  for (const root of [USER_ROOT, __dirname]) {
+    const rel = relative(root, abs);
+    if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
+      return rel.split(sep).join('/');
+    }
+  }
+  return '';
 }
 
 export function injectPrintPageCss(html, format = 'a4') {
@@ -375,9 +398,8 @@ export function injectPrintPageCss(html, format = 'a4') {
  * gitignored output/ artifacts and is meaningless on another machine.
  */
 function updatePDFManifest(reportNum, pdfPath, htmlPath, format) {
-  const manifestPath = resolve(__dirname, 'data', 'pdf-index.tsv');
-  const toRel = (p) => relative(__dirname, p).split(sep).join('/');
-  const relPDF = toRel(pdfPath);
+  const manifestPath = resolve(USER_ROOT, 'data', 'pdf-index.tsv');
+  const relPDF = repoRelativeManifestPath(pdfPath);
   const relHTML = repoRelativeManifestPath(htmlPath);
   const date = new Date().toISOString().slice(0, 10);
   // "008" and "8" are the same report — zero-padded report-link form vs
@@ -462,16 +484,9 @@ async function generatePDF() {
   inputPath = resolve(inputPath);
   outputPath = resolve(outputPath);
 
-  // Path-traversal guard: keep the PDF write inside the project directory so a
-  // crafted output argument (e.g. "../../etc/cron.d/x") can't escape the repo.
-  // Anchored to the repo root (__dirname), not process.cwd(): running the script
-  // from outside the repo used to falsely refuse in-repo outputs — and, worse,
-  // would have allowed writes anywhere under an arbitrary cwd.
-  const relOut = relative(__dirname, outputPath);
-  if (relOut === '' || relOut.startsWith('..') || isAbsolute(relOut)) {
-    console.error(`Refusing to write the PDF outside the project directory: ${outputPath}`);
-    process.exit(1);
-  }
+  // Path-traversal guard: allow writes under the system root or the resolved
+  // user root (dual-layout installs keep output/ next to cv.md).
+  assertWritablePdfPath(outputPath);
 
   // Validate format
   const validFormats = ['a4', 'letter'];
@@ -583,6 +598,8 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
   const reportNum = opts.reportNum || '';
   const inputPath = opts.inputPath || '';
 
+  outputPath = resolve(outputPath);
+  assertWritablePdfPath(outputPath);
   mkdirSync(dirname(outputPath), { recursive: true });
 
   // Inject the user's theme tokens (config/profile.yml `style:`) as CSS custom

@@ -18,8 +18,9 @@ import { dirname, resolve, basename, join } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 import { resolveTemplate } from "./cv-templates.mjs";
+import { envOrUserPath, getSystemRoot } from "./user-root.mjs";
 
-const OUTPUT_ROOT = resolve("output");
+const OUTPUT_ROOT = envOrUserPath("CAREER_OPS_OUTPUT", getSystemRoot(import.meta.url), "output");
 
 function safeOutputPath(raw) {
   // Derive a sanitized filename from raw string (strip path separators and dots)

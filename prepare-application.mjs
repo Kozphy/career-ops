@@ -21,8 +21,11 @@
 import { readFileSync, existsSync, statSync } from 'fs';
 import { basename, resolve, dirname, relative, isAbsolute } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveUserRoot, envOrUserPath } from './user-root.mjs';
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
+const SYSTEM_ROOT = dirname(fileURLToPath(import.meta.url));
+const USER_ROOT = resolveUserRoot(SYSTEM_ROOT);
+const ROOT = USER_ROOT;
 
 const ALLOWED_HOSTS = new Set([
   'boards.greenhouse.io',
@@ -50,8 +53,8 @@ if (!applyUrl || !pdfPath) {
 
 // ── PDF validation ────────────────────────────────────────────────────
 
-const outputDir = resolve(ROOT, 'output');
-const absPdf    = resolve(ROOT, pdfPath);
+const outputDir = envOrUserPath('CAREER_OPS_OUTPUT', SYSTEM_ROOT, 'output');
+const absPdf    = isAbsolute(pdfPath) ? pdfPath : resolve(process.cwd(), pdfPath);
 
 const relPdf = relative(outputDir, absPdf);
 if (relPdf === '' || relPdf.startsWith('..') || isAbsolute(relPdf)) {
@@ -128,7 +131,7 @@ function detectAts(url) {
 // ── Profile reader ────────────────────────────────────────────────────
 
 function readProfile() {
-  const profilePath = resolve(ROOT, 'config/profile.yml');
+  const profilePath = envOrUserPath('CAREER_OPS_PROFILE', SYSTEM_ROOT, 'config', 'profile.yml');
   if (!existsSync(profilePath)) return {};
   const raw = readFileSync(profilePath, 'utf-8');
 
@@ -139,12 +142,19 @@ function readProfile() {
 
   const fullName = pick('full_name');
   const [firstName, ...rest] = fullName.split(' ');
+  // Prefer structured location.city/country when candidate.location is a free string
+  const city = pick('city');
+  const country = pick('country');
+  const locationLine = pick('location');
+  const location = (city && country)
+    ? `${city}, ${country}`
+    : locationLine;
   return {
     firstName:    firstName || '',
     lastName:     rest.join(' ') || '',
     email:        pick('email'),
     phone:        pick('phone'),
-    location:     pick('location'),
+    location,
     linkedin:     pick('linkedin'),
     portfolioUrl: pick('portfolio_url'),
   };

@@ -11,12 +11,16 @@ import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { resolveExtractorMode } from './browser-extract.mjs';
+import { resolveUserRoot } from './user-root.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const systemRoot = __dirname;
 const argv = process.argv.slice(2);
 const targetIdx = argv.indexOf('--target');
 const projectRoot =
-  targetIdx !== -1 && argv[targetIdx + 1] ? argv[targetIdx + 1] : __dirname;
+  targetIdx !== -1 && argv[targetIdx + 1]
+    ? argv[targetIdx + 1]
+    : resolveUserRoot(systemRoot);
 const JSON_OUT = argv.includes('--json');
 // --strict adds a live ATS-slug probe of portals.yml (network). Opt-in so the
 // default `npm run doctor` stays fast and fully offline.
@@ -57,13 +61,14 @@ function checkNodeVersion() {
 }
 
 function checkDependencies() {
-  if (existsSync(join(projectRoot, 'node_modules'))) {
+  const candidates = [projectRoot, systemRoot, join(systemRoot, '..')];
+  if (candidates.some((root) => existsSync(join(root, 'node_modules')))) {
     return { pass: true, label: 'Dependencies installed' };
   }
   return {
     pass: false,
     label: 'Dependencies not installed',
-    fix: 'Run: npm install',
+    fix: 'Run: npm install (from the folder that holds package.json / node_modules)',
   };
 }
 
@@ -132,7 +137,10 @@ function playwrightMcpConfigured(root) {
 function checkScanExtractor(root) {
   const mode = resolveExtractorMode(join(root, 'config', 'profile.yml'));
   if (mode === 'cli') {
-    if (existsSync(join(root, 'browser-extract.mjs'))) {
+    if (
+      existsSync(join(systemRoot, 'browser-extract.mjs'))
+      || existsSync(join(root, 'browser-extract.mjs'))
+    ) {
       return { pass: true, label: 'Scan extractor: cli (browser-extract.mjs)' };
     }
     return {
@@ -207,12 +215,13 @@ function checkPrereq({ path, fix }) {
 }
 
 function checkFonts() {
-  const fontsDir = join(projectRoot, 'fonts');
-  if (!existsSync(fontsDir)) {
+  const fontsDir = [join(systemRoot, 'fonts'), join(projectRoot, 'fonts')]
+    .find((p) => existsSync(p));
+  if (!fontsDir) {
     return {
       pass: false,
       label: 'fonts/ directory not found',
-      fix: 'The fonts/ directory is required for PDF generation',
+      fix: 'The fonts/ directory is required for PDF generation (expected under the system career-ops folder)',
     };
   }
   try {
@@ -339,6 +348,10 @@ function checkPlugins(root) {
 async function main() {
   console.log('\ncareer-ops doctor');
   console.log('================\n');
+  if (projectRoot !== systemRoot) {
+    console.log(`userRoot:   ${projectRoot}`);
+    console.log(`systemRoot: ${systemRoot}\n`);
+  }
 
   const checks = [
     checkNodeVersion(),
@@ -408,7 +421,9 @@ function onboardingState(root) {
   ];
   for (const { target, template } of templates) {
     const targetPath = join(root, ...target.split('/'));
-    const templatePath = join(root, ...template.split('/'));
+    const templatePath = existsSync(join(root, ...template.split('/')))
+      ? join(root, ...template.split('/'))
+      : join(systemRoot, ...template.split('/'));
     if (!existsSync(targetPath) && existsSync(templatePath)) {
       try {
         copyFileSync(templatePath, targetPath);
