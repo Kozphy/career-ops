@@ -1,0 +1,29 @@
+.antigravitycli/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_139d578344f5aa 1-195
+.claude/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_c824519b10e041 1-195
+.cursor/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_a96e79a3256443 1-195
+.grok/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_b4c8095a4ebf55 1-195
+.opencode/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_b66066665cdb4c 1-195
+.qwen/skills/career-ops/SKILL.md
+  s_96e3dbaf2dc8cc::t_9bc49922c9b6ed 1-195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4e6db81cc0a6fde0b80490ba835da923d7eab811",
+  "prompts": {},
+  "sessions": {
+    "s_96e3dbaf2dc8cc": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "de82c80d-ee88-444d-816a-444ff566bbd9",
+        "model": "unknown"
+      },
+      "human_author": "Zixsa <50504962+Kozphy@users.noreply.github.com>"
+    }
+  }
+}
