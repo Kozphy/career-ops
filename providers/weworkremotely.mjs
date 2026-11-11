@@ -1,4 +1,6 @@
 // @ts-check
+import { decodeEntities } from './_html-entities.mjs';
+import { htmlToText } from './_html-to-text.mjs';
 /** @typedef {import('./_types.js').Provider} Provider */
 
 // We Work Remotely provider - board-wide RSS feed
@@ -54,33 +56,11 @@ export default {
   },
 };
 
-function fromCodePoint(cp) {
-  try {
-    return String.fromCodePoint(cp);
-  } catch {
-    return '';
-  }
-}
-
-// Decode the XML entities that appear in RSS text: numeric (&#38; / &#x27;)
-// and the named five. Numeric forms are decoded first; &amp; is decoded LAST
-// so a literal "&amp;lt;" yields "&lt;" rather than over-decoding to "<".
-function decodeXmlEntities(s) {
-  return s
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, d) => fromCodePoint(parseInt(d, 10)))
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&');
-}
-
 // Resolve a tag's inner text: unwrap a CDATA section, else decode entities.
 function extractText(inner) {
   const cdata = inner.match(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/);
   if (cdata) return cdata[1].trim();
-  return decodeXmlEntities(inner).trim();
+  return decodeEntities(inner).trim();
 }
 
 // Extract the text of the first <tag>...</tag> in a block. Returns '' when absent.
@@ -118,13 +98,14 @@ function splitTitle(rawTitle, defaultCompany) {
  *
  * Shape: `<rss><channel><item>...</item>...</channel></rss>`, each item
  * carrying `<title>`, `<link>`, `<pubDate>`, and often `<region>` plus
- * `<category>`. The title is usually "Company: Role"; when that split is
- * present, company and title are normalized separately. The RSS `<link>` is
- * the dedup key; items without a usable absolute URL are dropped.
+ * `<category>`, and `<description>` holds the posting's HTML. The title is
+ * usually "Company: Role"; when that split is present, company and title are
+ * normalized separately. The RSS `<link>` is the dedup key; items without a
+ * usable absolute URL are dropped.
  *
  * @param {string} xml - raw RSS feed body
  * @param {string} [defaultCompany] - fallback company for unsplittable titles
- * @returns {Array<{title: string, url: string, company: string, location: string, postedAt?: number}>}
+ * @returns {Array<{title: string, url: string, company: string, location: string, description?: string, postedAt?: number}>}
  */
 export function parseWwrFeed(xml, defaultCompany = 'We Work Remotely') {
   if (typeof xml !== 'string') return [];
@@ -142,13 +123,20 @@ export function parseWwrFeed(xml, defaultCompany = 'We Work Remotely') {
     const { company, title } = splitTitle(rawTitle, fallback);
     const location = tagText(item, 'region') || tagText(item, 'category');
 
-    jobs.push({
+    const job = {
       title,
       company,
       location,
       url,
       postedAt: toEpochMs(tagText(item, 'pubDate')),
-    });
+    };
+    // The posting's HTML is in this same feed, so it costs no request.
+    // content_filter, country_eligibility_filter and visa_filter read it, and
+    // formatScanHistoryRow() fingerprints it. Omitted when the text is empty,
+    // the "no signal" path each of those filters handles.
+    const description = htmlToText(tagText(item, 'description'));
+    if (description) job.description = description;
+    jobs.push(job);
   }
 
   return jobs;

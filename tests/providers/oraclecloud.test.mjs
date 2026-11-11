@@ -55,6 +55,75 @@ try {
     fail(`ocs variant returned ${JSON.stringify(ocsHit)}`);
   }
 
+  // ── numbered apex (oraclecloud<NN>.com) ─────────────────────────────
+  // Oracle issues newer tenants a numbered apex; the same three host shapes
+  // exist there. Before this was accepted, detect() returned null and the
+  // board scanned as zero jobs with no error.
+  const numberedShapes = [
+    ['plain', 'https://acme.fa.oraclecloud26.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs', 'acme.fa.oraclecloud26.com'],
+    ['<region>', 'https://acme.fa.us2.oraclecloud26.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs', 'acme.fa.us2.oraclecloud26.com'],
+    ['.ocs.', 'https://acme.fa.ocs.oraclecloud26.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs', 'acme.fa.ocs.oraclecloud26.com'],
+  ];
+  const numberedBad = numberedShapes.filter(([, url, host]) => {
+    const r = oc.detect({ name: 'X', careers_url: url });
+    return !(r && hostOf(r.url) === host);
+  });
+  if (numberedBad.length === 0) {
+    pass('oraclecloud.detect() handles the numbered apex (oraclecloud26.com) on all three host shapes');
+  } else {
+    fail(`numbered apex rejected for shape(s): ${numberedBad.map(([n]) => n).join(', ')}`);
+  }
+
+  // bounded family: 1..99 in, everything outside out. The regex is an SSRF
+  // pin — it must enumerate a finite apex set, never `oraclecloud<any>.com`.
+  const apexUrl = (apex) => `https://acme.fa.ocs.${apex}.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs`;
+  const acceptedApexes = ['oraclecloud', 'oraclecloud1', 'oraclecloud9', 'oraclecloud26', 'oraclecloud99'];
+  const rejectedApexes = ['oraclecloud0', 'oraclecloud01', 'oraclecloud100', 'oraclecloud26x', 'oraclecloudabc'];
+  const apexMisses = [
+    ...acceptedApexes.filter((a) => oc.detect({ name: 'X', careers_url: apexUrl(a) }) === null),
+    ...rejectedApexes.filter((a) => oc.detect({ name: 'X', careers_url: apexUrl(a) }) !== null),
+  ];
+  if (apexMisses.length === 0) {
+    pass('oraclecloud host pin is a BOUNDED apex family (1-99 accepted; 0, 01, 100, suffixed → null)');
+  } else {
+    fail(`apex boundary wrong for: ${apexMisses.join(', ')}`);
+  }
+
+  // numbered apex as a LABEL inside a hostile host → null (suffix spoof)
+  if (oc.detect({ name: 'Spoof3', careers_url: 'https://x.fa.ocs.oraclecloud26.evil.example/hcmUI/CandidateExperience/en/sites/CX_1/jobs' }) === null) {
+    pass('oraclecloud.detect() rejects a numbered apex used as a label of a hostile host');
+  } else {
+    fail('oraclecloud.detect() must reject oraclecloud26.<evil-domain>');
+  }
+
+  // numbered apex in the PATH, not the host → null
+  if (oc.detect({ name: 'Spoof4', careers_url: 'https://evil.example/x.fa.ocs.oraclecloud26.com/sites/CX_1/jobs' }) === null) {
+    pass('oraclecloud.detect() rejects a numbered apex placed in the path');
+  } else {
+    fail('oraclecloud.detect() must reject a path-spoofed numbered apex');
+  }
+
+  // numbered apex in USERINFO (before the @) → real host is evil → null
+  if (oc.detect({ name: 'Spoof5', careers_url: 'https://acme.fa.ocs.oraclecloud26.com@evil.example/hcmUI/CandidateExperience/en/sites/CX_1/jobs' }) === null) {
+    pass('oraclecloud.detect() rejects a numbered apex hidden in URL userinfo');
+  } else {
+    fail('oraclecloud.detect() must reject a userinfo-spoofed numbered apex');
+  }
+
+  // right label, wrong TLD → null
+  if (oc.detect({ name: 'Spoof6', careers_url: 'https://acme.fa.ocs.oraclecloud26.net/hcmUI/CandidateExperience/en/sites/CX_1/jobs' }) === null) {
+    pass('oraclecloud.detect() rejects the numbered apex on a non-.com TLD');
+  } else {
+    fail('oraclecloud.detect() must reject oraclecloud26.net');
+  }
+
+  // plaintext numbered apex → null (HTTPS-only, same as the unnumbered apex)
+  if (oc.detect({ name: 'X', careers_url: 'http://acme.fa.ocs.oraclecloud26.com/hcmUI/CandidateExperience/en/sites/CX_1/jobs' }) === null) {
+    pass('oraclecloud.detect() rejects a plaintext numbered-apex URL');
+  } else {
+    fail('oraclecloud.detect() must reject http:// on the numbered apex');
+  }
+
   // default siteNumber CX_1 when no /sites/<n>/ in the path
   const noSite = oc.detect({ name: 'X', careers_url: 'https://acme.fa.oraclecloud.com/hcmUI/CandidateExperience/en/' });
   if (noSite && noSite.url.includes('siteNumber=CX_1,')) {
@@ -352,6 +421,247 @@ try {
     pass('oraclecloud.fetch() retries a 429 and recovers (via injected ctx.sleep)');
   } else {
     fail(`retry: attempts=${attempts}, slept=${slept}, jobs=${JSON.stringify(retried)}`);
+  }
+
+  // ── a board cut short by max_pages says so (lib/board-truncation.mjs) ──
+  {
+    const cut = await oc.fetch(
+      { name: 'Capped', careers_url: careers, max_pages: 2 },
+      {
+        transport: 'http',
+        sleep: async () => {},
+        fetchText: async () => {},
+        fetchJson: async (url) => {
+          const offset = Number(new URL(url).searchParams.get('offset') || 0);
+          return { items: [{ TotalJobsCount: 1000, requisitionList: Array.from({ length: 200 }, (_, i) => ({ Id: String(offset + i), Title: `R${offset + i}` })) }], hasMore: true };
+        },
+      },
+    );
+    cut.length === 400 && cut.truncated?.reason === 'page-cap' && cut.truncated?.fetched === 400 && cut.truncated?.total === 1000
+      ? pass('oraclecloud.fetch() marks a max_pages-capped board with jobs.truncated (400 of 1000)')
+      : fail(`oraclecloud page-cap flag: ${cut.length} jobs, truncated=${JSON.stringify(cut.truncated)}`);
+
+    // ctx.maxPages is verify-portals' one-page liveness probe, not a scan: it
+    // stops early by design, so it must not report the board as partial (same
+    // convention as eightfold's probeLimited and apple's probing).
+    let probeRequests = 0;
+    const probe = await oc.fetch(
+      { name: 'Probed', careers_url: careers, max_pages: 2 },
+      {
+        transport: 'http',
+        maxPages: 1,
+        sleep: async () => {},
+        fetchText: async () => {},
+        fetchJson: async (url) => {
+          probeRequests++;
+          const offset = Number(new URL(url).searchParams.get('offset') || 0);
+          return { items: [{ TotalJobsCount: 1000, requisitionList: Array.from({ length: 200 }, (_, i) => ({ Id: String(offset + i), Title: `R${offset + i}` })) }], hasMore: true };
+        },
+      },
+    );
+    probeRequests === 1 && probe.length === 200 && !probe.truncated
+      ? pass('oraclecloud.fetch() stops a ctx.maxPages liveness probe after one page, unflagged')
+      : fail(`oraclecloud probe: ${probeRequests} requests, ${probe.length} jobs, truncated=${JSON.stringify(probe.truncated)}`);
+  }
+
+  // ── pagination: a SHORT page is not the end when a total says otherwise ──
+  // American Express (egug pod, CX_1) reports TotalJobsCount 454 and serves
+  // 200, 199, 54 — the middle page is one row short because ORC filters a row
+  // server-side. The old `listLen < PAGE_SIZE` stop took that 199 as the end of
+  // the board and returned 399 of 454, losing 12% of the postings.
+  const amexPages = [200, 199, 54];
+  let amexRequests = 0;
+  const amexJobs = await oc.fetch(
+    { name: 'Amex', careers_url: careers, max_pages: 10 },
+    {
+      transport: 'http',
+      sleep: async () => {},
+      fetchText: async () => { throw new Error('fetchText should not be called'); },
+      fetchJson: async (url) => {
+        const offset = Number(new URL(url).searchParams.get('offset') || 0);
+        const rows = amexPages[amexRequests] ?? 0;
+        amexRequests++;
+        return { items: [{ TotalJobsCount: 454, requisitionList: Array.from({ length: rows }, (_, i) => ({ Id: String(offset + i), Title: `Role ${offset + i}` })) }], hasMore: false };
+      },
+    },
+  );
+  if (amexJobs.length === 453 && amexRequests === 3) {
+    pass('oraclecloud.fetch() walks past a short middle page while TotalJobsCount says more (453 rows, 3 requests)');
+  } else {
+    fail(`short-page walk: got ${amexJobs.length} jobs in ${amexRequests} requests, expected 453 in 3`);
+  }
+
+  // Once the walk has covered the reported total, it stops — no speculative
+  // extra request beyond the last page.
+  let pastTotalRequests = 0;
+  const pastTotal = await oc.fetch(
+    { name: 'Exact', careers_url: careers, max_pages: 10 },
+    {
+      transport: 'http',
+      sleep: async () => {},
+      fetchText: async () => {},
+      fetchJson: async (url) => {
+        const offset = Number(new URL(url).searchParams.get('offset') || 0);
+        pastTotalRequests++;
+        return { items: [{ TotalJobsCount: 400, requisitionList: Array.from({ length: 200 }, (_, i) => ({ Id: String(offset + i), Title: `R${offset + i}` })) }], hasMore: false };
+      },
+    },
+  );
+  if (pastTotal.truncated) fail(`a board read to its total was flagged truncated: ${JSON.stringify(pastTotal.truncated)}`);
+  else pass('oraclecloud.fetch() leaves a board read to its total unflagged');
+  if (pastTotalRequests === 2 && pastTotal.length === 400) {
+    pass('oraclecloud.fetch() stops once offset+PAGE_SIZE reaches the reported total');
+  } else {
+    fail(`past-total stop: ${pastTotalRequests} requests, ${pastTotal.length} jobs, expected 2 and 400`);
+  }
+
+  // A tenant that reports NO total keeps the old short-page stop — that is the
+  // only signal left, and paging on would loop until max_pages.
+  let noTotalRequests = 0;
+  const noTotal = await oc.fetch(
+    { name: 'NoTotal', careers_url: careers, max_pages: 10 },
+    {
+      transport: 'http',
+      sleep: async () => {},
+      fetchText: async () => {},
+      fetchJson: async (url) => {
+        const offset = Number(new URL(url).searchParams.get('offset') || 0);
+        const rows = noTotalRequests === 0 ? 200 : 12;
+        noTotalRequests++;
+        return { items: [{ requisitionList: Array.from({ length: rows }, (_, i) => ({ Id: String(offset + i), Title: `N${offset + i}` })) }], hasMore: false };
+      },
+    },
+  );
+  if (noTotalRequests === 2 && noTotal.length === 212) {
+    pass('oraclecloud.fetch() still stops on a short page when the tenant reports no total');
+  } else {
+    fail(`no-total stop: ${noTotalRequests} requests, ${noTotal.length} jobs, expected 2 and 212`);
+  }
+
+  // An empty page ends the walk even when the total claims more (a tenant whose
+  // count is stale must not drive the loop to max_pages).
+  let emptyRequests = 0;
+  const emptyStop = await oc.fetch(
+    { name: 'StaleTotal', careers_url: careers, max_pages: 10 },
+    {
+      transport: 'http',
+      sleep: async () => {},
+      fetchText: async () => {},
+      fetchJson: async (url) => {
+        const offset = Number(new URL(url).searchParams.get('offset') || 0);
+        const rows = emptyRequests === 0 ? 200 : 0;
+        emptyRequests++;
+        return { items: [{ TotalJobsCount: 9999, requisitionList: Array.from({ length: rows }, (_, i) => ({ Id: String(offset + i), Title: `S${offset + i}` })) }], hasMore: false };
+      },
+    },
+  );
+  if (emptyRequests === 2 && emptyStop.length === 200) {
+    pass('oraclecloud.fetch() stops on an empty page even when the reported total is stale');
+  } else {
+    fail(`empty-page stop: ${emptyRequests} requests, ${emptyStop.length} jobs, expected 2 and 200`);
+  }
+  // ── truncation warning + opt-in page cap ─────────────────────────────
+  // JPMorgan Chase has 7118 postings; 25 pages x 200 = 5000, so a default scan
+  // used to return 5000 with no word that 2118 were never read.
+  const pagedCtx = (total, counter) => ({
+    transport: 'http',
+    sleep: async () => {},
+    fetchText: async () => {},
+    fetchJson: async (url) => {
+      const offset = Number(new URL(url).searchParams.get('offset') || 0);
+      counter.n++;
+      const rows = Math.max(0, Math.min(200, total - offset));
+      return { items: [{ TotalJobsCount: total, requisitionList: Array.from({ length: rows }, (_, i) => ({ Id: String(offset + i), Title: `J${offset + i}` })) }], hasMore: false };
+    },
+  });
+  const captureWarn = async (fn) => {
+    const lines = [];
+    const orig = console.error;
+    console.error = (...a) => { lines.push(a.join(' ')); };
+    try { return { result: await fn(), lines }; } finally { console.error = orig; }
+  };
+
+  const defCount = { n: 0 };
+  const def = await captureWarn(() => oc.fetch({ name: 'JPMC', careers_url: careers }, pagedCtx(7118, defCount)));
+  if (def.result.length === 5000 && defCount.n === 25) pass('oraclecloud.fetch() default behaviour unchanged: 25 pages, 5000 jobs');
+  else fail(`default cap: ${def.result.length} jobs in ${defCount.n} requests, expected 5000 in 25`);
+  if (def.lines.length === 1 && def.lines[0].includes('JPMC') && def.lines[0].includes('max_pages=25')
+      && def.lines[0].includes('5000 of 7118') && def.lines[0].includes('raise max_pages') && def.result.oraclecloudTruncated === true) {
+    pass('oraclecloud.fetch() warns (entry, max_pages, N of M, how to raise) and tags the array when the cap cuts the board');
+  } else {
+    fail(`truncation warning wrong: ${JSON.stringify(def.lines)}`);
+  }
+
+  const optCount = { n: 0 };
+  const opt = await captureWarn(() => oc.fetch({ name: 'JPMC', careers_url: careers, max_pages: 40 }, pagedCtx(7118, optCount)));
+  if (opt.result.length === 7118 && optCount.n === 36 && opt.lines.length === 0 && !opt.result.oraclecloudTruncated) {
+    pass('oraclecloud.fetch() max_pages above the old 25-page ceiling reads the whole board, with no warning');
+  } else {
+    fail(`opt-in cap: ${opt.result.length} jobs in ${optCount.n} requests, warnings ${JSON.stringify(opt.lines)}`);
+  }
+
+  const ceilCount = { n: 0 };
+  const ceil = await captureWarn(() => oc.fetch({ name: 'Huge', careers_url: careers, max_pages: 100000 }, pagedCtx(50000, ceilCount)));
+  if (ceilCount.n === mod.HARD_MAX_PAGES && ceil.result.length === mod.HARD_MAX_PAGES * 200
+      && ceil.lines.length === 1 && ceil.lines[0].includes('ceiling')) {
+    pass('oraclecloud.fetch() clamps max_pages to HARD_MAX_PAGES and says the ceiling was hit');
+  } else {
+    fail(`ceiling: ${ceilCount.n} requests, ${ceil.result.length} jobs, warnings ${JSON.stringify(ceil.lines)}`);
+  }
+
+  // Complete boards stay quiet: exact fit at the cap, and a server-filtered row
+  // (Amex 453 of 454) that ends on a short last page.
+  const fitCount = { n: 0 };
+  const fit = await captureWarn(() => oc.fetch({ name: 'Fit', careers_url: careers, max_pages: 2 }, pagedCtx(400, fitCount)));
+  if (fit.result.length === 400 && fit.lines.length === 0) pass('oraclecloud.fetch() is silent when the cap equals the board exactly');
+  else fail(`exact fit warned or short: ${fit.result.length}, ${JSON.stringify(fit.lines)}`);
+
+  // A short final page that lands on the cap, with a total reported: the board ended, so no warning.
+  const shortCount = { n: 0 };
+  const shortFit = await captureWarn(() => oc.fetch({ name: 'ShortFit', careers_url: careers, max_pages: 2 }, pagedCtx(399, shortCount)));
+  if (shortFit.result.length === 399 && shortCount.n === 2 && shortFit.lines.length === 0 && !shortFit.result.truncated) {
+    pass('oraclecloud.fetch() is silent when a short last page coincides with the cap (399 of 399)');
+  } else {
+    fail(`short page at cap: ${shortFit.result.length} jobs, ${shortCount.n} requests, ${JSON.stringify(shortFit.lines)}`);
+  }
+
+  // No reported total: warn when the cap is reached, because nothing says the board ended.
+  const nt = await captureWarn(() => oc.fetch({ name: 'NoTotalCap', careers_url: careers, max_pages: 2 }, {
+    transport: 'http', sleep: async () => {}, fetchText: async () => {},
+    fetchJson: async (url) => {
+      const offset = Number(new URL(url).searchParams.get('offset') || 0);
+      return { items: [{ requisitionList: Array.from({ length: 200 }, (_, i) => ({ Id: String(offset + i), Title: `T${offset + i}` })) }] };
+    },
+  }));
+  if (nt.result.length === 400 && nt.lines.length === 1 && nt.lines[0].includes('total unknown')) {
+    pass('oraclecloud.fetch() warns at the cap when the tenant reports no total');
+  } else {
+    fail(`no-total cap: ${nt.result.length} jobs, ${JSON.stringify(nt.lines)}`);
+  }
+
+  // A health probe asks for one page via ctx.maxPages: honoured, and not reported as truncation.
+  const probeCount = { n: 0 };
+  const probeRun = await captureWarn(() => oc.fetch({ name: 'Probe', careers_url: careers }, { ...pagedCtx(7118, probeCount), maxPages: 1 }));
+  if (probeCount.n === 1 && probeRun.result.length === 200 && probeRun.lines.length === 0 && !probeRun.result.oraclecloudTruncated) {
+    pass('oraclecloud.fetch() honours ctx.maxPages (health probe) and stays silent about that stop');
+  } else {
+    fail(`probe cap: ${probeCount.n} requests, ${probeRun.result.length} jobs, warnings ${JSON.stringify(probeRun.lines)}`);
+  }
+
+  // Entry cap equal to the probe cap: still a probe stop, still silent.
+  const eqCount = { n: 0 };
+  const eq = await captureWarn(() => oc.fetch({ name: 'Eq', careers_url: careers, max_pages: 1 }, { ...pagedCtx(7118, eqCount), maxPages: 1 }));
+  if (eqCount.n === 1 && eq.lines.length === 0 && !eq.result.oraclecloudTruncated) {
+    pass('oraclecloud.fetch() is silent when max_pages equals the probe cap');
+  } else {
+    fail(`equal caps warned: ${JSON.stringify(eq.lines)}`);
+  }
+
+  if (mod.resolveMaxPages({}) === 25 && mod.resolveMaxPages({ max_pages: 0 }) === 25 && mod.resolveMaxPages({ max_pages: 'x' }) === 25
+      && mod.resolveMaxPages({ max_pages: 60 }) === 60 && mod.resolveMaxPages({ max_pages: 9999 }) === mod.HARD_MAX_PAGES) {
+    pass('oraclecloud.resolveMaxPages() defaults to 25, honours a positive integer, caps at HARD_MAX_PAGES');
+  } else {
+    fail('resolveMaxPages mapping wrong');
   }
 
 } catch (e) {

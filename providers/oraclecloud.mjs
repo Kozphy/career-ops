@@ -10,6 +10,14 @@
 //   <tenant>.fa.oraclecloud.com
 //   <tenant>.fa.<region>.oraclecloud.com   (e.g. us2)
 //   <tenant>.fa.ocs.oraclecloud.com
+//   ...and the same three shapes on the numbered apex `oraclecloud<NN>.com`
+//   that Oracle issues to newer tenants (observed live: a Fusion board on
+//   `<tenant>.fa.ocs.oraclecloud26.com` whose unnumbered `oraclecloud.com`
+//   sibling host does not resolve at all).
+//
+// The numeric suffix is BOUNDED (1-99), not open-ended: this regex exists to
+// PIN the host before every fetch, so it enumerates a finite apex family and
+// never degrades into `oraclecloud<anything>.com`.
 //
 // Career page URL:
 //   https://<host>/hcmUI/CandidateExperience/<lang>/sites/<siteNumber>/jobs
@@ -34,18 +42,22 @@
 // User-Agent is sent to reduce (not eliminate) WAF friction.
 
 import { decodeEntities } from './_html-entities.mjs';
+import { BROWSER_LIKE_USER_AGENT, fetchJsonWithRetry, sleep } from './_http.mjs';
 
-const ORACLE_HOST_RE = /^[a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?(?:ocs\.)?oraclecloud\.com$/i;
+// `oraclecloud(?:[1-9][0-9]?)?` = oraclecloud.com plus oraclecloud1.com …
+// oraclecloud99.com. No leading zero, at most two digits — a bounded family,
+// so this stays a host pin and never becomes a wildcard apex match.
+const ORACLE_HOST_RE = /^[a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?(?:ocs\.)?oraclecloud(?:[1-9][0-9]?)?\.com$/i;
 
 const PAGE_SIZE = 200;
-const MAX_PAGES = 25;             // safety cap (~5000 jobs); hard ceiling like workday
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY_MS = 500;
-const RETRY_MAX_DELAY_MS = 8_000;
-const INTER_PAGE_DELAY_MS = 150;  // WAF-aware spacing between same-host pages
-
-// Browser-like UA reduces WAF friction; ORC's requisitions API needs no auth.
-const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const MAX_PAGES = 25;             // default cap (~5000 jobs) when the entry sets no max_pages
+// Upper bound an entry may opt in to with `max_pages` (~20000 jobs, 100 requests
+// of 200 rows at 250ms spacing). JPMorgan Chase alone has 7000+ postings, which
+// the default cannot cover; the bound stays finite so a typo can't walk a board
+// forever.
+export const HARD_MAX_PAGES = 100;
+const RETRY_POLICY = { retries: 3 };
+const INTER_PAGE_DELAY_MS = 250;  // WAF-aware spacing between same-host pages
 
 // facetsList is a fixed constant on the finder; %3B is the encoded ';' separator.
 const FACETS_LIST = 'LOCATIONS%3BWORK_LOCATIONS%3BWORKPLACE_TYPES%3BTITLES%3BCATEGORIES%3BORGANIZATIONS%3BPOSTING_DATES%3BFLEX_FIELDS';
@@ -60,7 +72,7 @@ function assertOracleUrl(url) {
   }
   if (parsed.protocol !== 'https:') throw new Error(`oraclecloud: URL must use HTTPS: ${url}`);
   if (!ORACLE_HOST_RE.test(parsed.hostname)) {
-    throw new Error(`oraclecloud: untrusted hostname "${parsed.hostname}" — must match *.fa[.<region>][.ocs].oraclecloud.com`);
+    throw new Error(`oraclecloud: untrusted hostname "${parsed.hostname}" — must match *.fa[.<region>][.ocs].oraclecloud[1-99].com`);
   }
   return url;
 }
@@ -71,45 +83,6 @@ function toEpochMs(value) {
   if (!value) return undefined;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? undefined : parsed;
-}
-
-function sleep(ms, ctx) {
-  if (typeof ctx?.sleep === 'function') return ctx.sleep(ms);
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Parses a `Retry-After` header value (seconds, or an HTTP-date) to ms, or null. */
-function parseRetryAfterMs(value) {
-  if (!value) return null;
-  const secs = Number(value);
-  if (Number.isFinite(secs) && secs >= 0) return secs * 1000;
-  const dateMs = Date.parse(value);
-  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
-}
-
-function isRetryableError(err) {
-  const status = err?.status;
-  if (status === 429) return true;
-  if (typeof status === 'number' && status >= 500) return true;
-  return status === undefined; // network error / timeout / abort — no status set
-}
-
-/** Fetches a single page, retrying transient failures with backoff + jitter. */
-async function fetchPageWithRetry(ctx, api, opts) {
-  let lastErr;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await ctx.fetchJson(api, opts);
-    } catch (err) {
-      lastErr = err;
-      if (attempt === MAX_RETRIES || !isRetryableError(err)) throw err;
-      const backoff = Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_DELAY_MS);
-      const retryAfterMs = parseRetryAfterMs(err?.retryAfter);
-      const delayMs = retryAfterMs !== null ? Math.min(retryAfterMs, RETRY_MAX_DELAY_MS * 4) : (backoff + Math.random() * 250);
-      await sleep(delayMs, ctx);
-    }
-  }
-  throw lastErr;
 }
 
 /**
@@ -242,6 +215,18 @@ export function parseOracleResponse(json, site, companyName) {
   return out;
 }
 
+/**
+ * Page cap for an entry: a positive integer `max_pages` up to HARD_MAX_PAGES,
+ * else the default. Exported for unit tests.
+ * @param {{max_pages?: unknown}} entry
+ */
+export function resolveMaxPages(entry) {
+  const v = entry?.max_pages;
+  return Number.isInteger(v) && /** @type {number} */ (v) > 0
+    ? Math.min(/** @type {number} */ (v), HARD_MAX_PAGES)
+    : MAX_PAGES;
+}
+
 /** @type {Provider} */
 export default {
   id: 'oraclecloud',
@@ -259,22 +244,25 @@ export default {
     const site = resolveSite(entry);
     if (!site) throw new Error(`oraclecloud: cannot derive API URL for ${entry.name}`);
 
-    const maxPages = Number.isInteger(entry.max_pages) && entry.max_pages > 0
-      ? Math.min(entry.max_pages, MAX_PAGES)
-      : MAX_PAGES;
+    const entryMaxPages = resolveMaxPages(entry);
+    // Health probes / audits pass ctx.maxPages (1) to ask for a single page;
+    // honour it, and don't call that deliberate stop a truncation.
+    const ctxCap = Number.isInteger(ctx?.maxPages) && ctx.maxPages > 0 ? ctx.maxPages : Infinity;
+    const maxPages = Math.min(entryMaxPages, ctxCap);
 
     const all = [];
     let total = null;
+    let capped = true; // flips to false whenever a stop condition ends the walk
     for (let page = 0; page < maxPages; page++) {
       const offset = page * PAGE_SIZE;
       const apiUrl = buildApiUrl(site, offset, PAGE_SIZE);
       assertOracleUrl(apiUrl); // SSRF guard before every fetch
       if (page > 0) await sleep(INTER_PAGE_DELAY_MS, ctx);
 
-      const json = await fetchPageWithRetry(ctx, apiUrl, {
+      const json = await fetchJsonWithRetry(ctx, apiUrl, {
         redirect: 'error',
-        headers: { 'User-Agent': BROWSER_UA, Accept: 'application/json' },
-      });
+        headers: { 'User-Agent': BROWSER_LIKE_USER_AGENT, Accept: 'application/json' },
+      }, RETRY_POLICY);
 
       const parsed = parseOracleResponse(json, site, entry.name);
       all.push(...parsed);
@@ -285,12 +273,36 @@ export default {
 
       // Stop conditions. NOTE: `hasMore` is unreliable on some tenants (e.g.
       // JPMC returns hasMore:false on EVERY page even with 7000+ jobs), so it's
-      // NOT used to stop — trusting it caps the scan at one page. The
-      // authoritative signals are the returned list length and TotalJobsCount:
-      //   - an empty or short page means we've reached the end;
-      //   - once we've paged past TotalJobsCount there's nothing left to fetch.
-      if (listLen === 0 || listLen < PAGE_SIZE) break;
-      if (total !== null && offset + PAGE_SIZE >= total) break;
+      // NOT used to stop — trusting it caps the scan at one page.
+      //
+      // An empty page is always the end. A SHORT page is not: ORC serves fewer
+      // rows than the limit mid-list (American Express reports TotalJobsCount
+      // 454 and serves 200, 199, 54 — one row is filtered server-side), and
+      // treating that 199 as the end dropped the last 54 postings, 12% of the
+      // board. Matching the wider convention: "the API may return fewer results
+      // than the number requested … even if not at the end of the collection"
+      // (Google AIP-158). So a short page only ends the walk when the tenant
+      // reports no total to check it against.
+      if (listLen === 0) { capped = false; break; }
+      if (total !== null) {
+        if (offset + PAGE_SIZE >= total) { capped = false; break; }
+      } else if (listLen < PAGE_SIZE) { capped = false; break; }
+    }
+
+    // The page cap ended the walk with rows still unread (or, when the tenant
+    // reports no total, with no sign the board ended). Say so: a silently
+    // short board reads as a complete one.
+    if (capped && entryMaxPages < ctxCap) {
+      const counts = total === null ? `${all.length} jobs fetched, total unknown` : `${all.length} of ${total} jobs`;
+      const advice = maxPages < HARD_MAX_PAGES
+        ? `raise max_pages on this entry for more (up to ${HARD_MAX_PAGES})`
+        : `max_pages is already at the ${HARD_MAX_PAGES}-page ceiling`;
+      console.error(`⚠️  oraclecloud: ${entry.name} truncated at max_pages=${maxPages} (${counts}) — ${advice}`);
+      // Same tag workday.mjs / eightfold.mjs put on a cut-short board, so a
+      // caller that cannot see stderr can still tell.
+      /** @type {any} */ (all).oraclecloudTruncated = true;
+      // Canonical shape read by lib/board-truncation.mjs (scan.mjs).
+      /** @type {any} */ (all).truncated = { reason: 'page-cap', fetched: all.length, ...(total === null ? {} : { total }) };
     }
     return all;
   },
