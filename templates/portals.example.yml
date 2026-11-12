@@ -231,7 +231,9 @@
 #
 # Example below targets US-based remote + a couple of US metros, blocking
 # common foreign hubs. Customize to your geography. Keywords match whole words
-# and take no `word:`/`stem:` prefix. Some providers mark remote roles in their
+# and take no `word:`/`stem:` prefix. A Chinese or Japanese keyword matches
+# anywhere in the location (北京 matches "北京市海淀区"), because those scripts
+# put no space between words. Some providers mark remote roles in their
 # own words: arbeitsagentur writes "Deutschlandweit (Homeoffice)", so a German
 # commute filter needs always_allow: ["Deutschlandweit"] (see its entry below).
 
@@ -1316,7 +1318,7 @@ search_queries:
 #   deel            jobs.deel.com/<slug>                (Deel job board; a tenant that redirects off-host is not readable)
 #   inrecruiting    <tenant>.intervieweb.it             (Zucchetti InRecruiting career page; /en/career etc. picks the language)
 #   keka            <tenant>.keka.com                   (Keka careers page, /careers; the feed id is read off that page)
-#   darwinbox       <tenant>.darwinbox.in/ms/candidatev2/<companyId>/careers/...   (the company id is required; a bare tenant host is not claimed)
+#   darwinbox       <tenant>.darwinbox.in/ms/candidatev2/<companyId>/careers/...   (or darwinbox.com; the company id is required; a bare tenant host is not claimed)
 #   turbohire       <tenant>.turbohire.co               (TurboHire careers page, any path; the org id is looked up from the subdomain)
 #   solidjobs       solid.jobs/public-api/offers/<division>
 #   comeet          api: https://www.comeet.co/careers-api/2.0/company/<uid>/positions?token=<token>
@@ -2116,7 +2118,7 @@ search_queries:
 #
 # - name: SEEK — Australia (Melbourne)   # same SEEK platform, AU host + site key
 #   provider: jobstreet
-#   api: https://www.seek.com.au/api/jobsearch/v5/search
+#   api: https://au.seek.com/api/jobsearch/v5/search
 #   siteKey: AU-Main
 #   searchKeywords: "strategy consultant"
 #   searchLocation: "Melbourne VIC"
